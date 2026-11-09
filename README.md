@@ -5,11 +5,22 @@ A small CRM for the Business Development raisers. It replaces filling in the MR 
 - **Raisers** open the site on their phone, tap a company and log what they did with one tap (*Called, Messaged, Sent offer, Followed up, They agreed, They refused*). They can add a note and set a next step with a date.
 - **The head** writes on the **Comments** page, to one raiser or to the whole team, and can link a comment to a company. Raisers see a "new comments" notice on My work. They can reply and press **Mark done** once they have acted on a comment.
 - **Trackers** open the **Team dashboard**. It shows each raiser's last activity, updates in the last 7 days, confirmed partners, and the companies that are overdue or have gone quiet. It also shows the pipeline for each direction (Infopartners, RnR, Coffee-break, EWD).
+- **Everyone logs in with their own name and PIN**, so nobody can open another person's account or sign updates with their name. After 5 wrong PINs an account locks for 15 minutes.
+
+**Roles**
+
+| Role | Can do |
+|---|---|
+| Raiser | Log work, take and release companies, add companies, reply to comments |
+| Head (`Tracker` in the sheet) | Everything above, plus write comments, assign companies to people, delete companies |
+| Admin | Everything above, plus the **People** page: change roles, reset PINs, remove or restore people |
+
+The first person to create an account becomes the Admin. Everyone after that starts as a Raiser.
 
 ```
 GitHub Pages (index.html)  ──►  Google Apps Script (Code.gs)  ──►  Google Sheet
      the website                   free API, no server               the data:
-                                                                     Companies · Log · Team · Comments
+                                                                     Companies · Log · Team · Comments · Deleted
 ```
 
 The Google Sheet stays the single source of truth, so trackers can still open it, filter it and export it as before.
@@ -22,10 +33,10 @@ The Google Sheet stays the single source of truth, so trackers can still open it
 
 1. Create a new Google Sheet, for example **"MR Tracker — data"**. Keep it private. The website reaches it through the script, so raisers do not need access to the sheet.
 2. **Extensions → Apps Script**. Delete the sample code, paste in all of [`backend/Code.gs`](backend/Code.gs), then press **Save**.
-3. Choose the function **`setup`** in the toolbar and press **Run**. Google asks for permission. Approve it. This creates the tabs `Companies`, `Log`, `Team` and `Comments`.
+3. Choose the function **`setup`** in the toolbar and press **Run**. Google asks for permission. Approve it. This creates the tabs `Companies`, `Log`, `Team`, `Comments` and `Deleted`.
 4. **Project Settings (gear icon) → Script properties → Add script property**
    - Property: `ACCESS_CODE`
-   - Value: a team code, for example `gox-bd-2026`. Everyone types this code once on their device. Change it whenever someone leaves the team.
+   - Value: a team code, for example `gox-bd-2026`. It is needed to log in or create an account on a new device. Personal PINs protect each account; the team code keeps strangers from even seeing the login screen.
 
 ### 2. Import the companies from the old MR
 
@@ -53,14 +64,18 @@ That loads all 197 companies from the GoX tabs: RnR 51, Infopartners 42, Coffee-
 4. Repository **Settings → Pages → Build and deployment → Deploy from a branch → `main` / root → Save**.
 5. After about a minute the site is live at `https://<your-username>.github.io/mr-tracker/`.
 
-### 5. Hand it to the team
+### 5. Create your Admin account first
+
+Open the site yourself **before** sending the link to anyone. Enter the team code, then **Create account** with your name and a PIN. Because you are the first, you become the **Admin**.
+
+### 6. Hand it to the team
 
 Send the link and the team code to the raisers. The first time they open it:
 1. They enter the team code.
-2. They pick their name, or add themselves as a **Raiser**.
+2. They press **Create an account**, type their name and choose a PIN that only they know.
 3. They go to **All companies**, filter by their direction and press **Take** on the companies they will raise.
 
-The head and the trackers add themselves with the role **Head / Tracker**. Only people with that role can write new comments. Everyone can reply.
+To give the head their role, open **People** and change their role to **Head**.
 
 ---
 
@@ -84,9 +99,11 @@ They map to the old MR columns: Cold-call or Message = *Contacted*, Commercial o
 - **Edit `index.html` or `config.js`**: upload the new file to GitHub. Pages updates in about a minute.
 - **Edit `Code.gs`**: go to **Deploy → Manage deployments → pencil icon → Version: New version → Deploy**. The URL stays the same.
 - **New direction or project**: add it to `DIRECTIONS` or `PROJECTS` in `config.js`.
-- **Remove someone from the name list**: in the `Team` tab, set `active` to `no`.
+- **Someone left the team**: **People → Remove**. They are logged out on every device, their companies become unassigned, and their past updates stay in the history. **Restore** brings the account back.
+- **Someone forgot their PIN**: **People → Reset PIN**. The site shows a new 4-digit PIN; give it to them privately. They can change it by tapping their name at the top right.
+- **A company was added by mistake**: open it and press **Delete this company** (Admin and Head only). It moves to the `Deleted` tab of the sheet. To bring it back, cut its row from `Deleted` (without the last two columns) and paste it at the bottom of `Companies`.
 - **Fix data by hand**: edit the `Companies` tab directly. The site picks up the change within a minute. Leave the `Log` tab as it is, because it is the history.
 
 ## Try it without setting anything up
 
-Open `index.html` while `API_URL` in `config.js` is empty. The site runs in **demo mode** with sample companies and placeholder raisers. Demo data is saved only in your browser, and **Reset demo data** restores it.
+Open `index.html` while `API_URL` in `config.js` is empty. The site runs in **demo mode** with sample companies and placeholder raisers. Every demo PIN is `1111`; log in as **Admin** to see the People page. Demo data is saved only in your browser, and **Reset demo data** restores it.

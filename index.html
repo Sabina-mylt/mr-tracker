@@ -278,7 +278,9 @@ var ACTIONS = [
 /* ================= state ================= */
 var S = {
   companies: [], log: [], team: [], comments: [], cFilter: 'open',
-  me: store('mrt-me') || '',
+  me: '', role: '',
+  token: store('mrt-token') || '',
+  loginList: null, authMode: 'login', confirm: null, resetResult: null,
   code: store('mrt-code') || '',
   view: (location.hash || '#my').slice(1),
   project: store('mrt-project') || 'All',
@@ -294,93 +296,214 @@ function store(k, v) {
 }
 
 /* ================= data layer ================= */
+// GET {action:'team'} = names for the login screen (needs the team code)
+// GET (data)          = everything, for a logged-in person (needs the session token)
+// POST                = login/register (team code + PIN) or any change (session token)
 function api(method, payload) {
-  if (DEMO) return Promise.resolve(demoApi(method, payload));
+  payload = payload || {};
   var p;
-  if (method === 'GET') {
-    p = fetch(API + '?action=data&code=' + encodeURIComponent(S.code), { redirect: 'follow' });
+  if (DEMO) {
+    p = Promise.resolve().then(function () { return demoApi(method, payload); });
+  } else if (method === 'GET') {
+    var a = payload.action || 'data';
+    p = fetch(API + '?action=' + a + (a === 'team' ? '&code=' + encodeURIComponent(S.code) : '&token=' + encodeURIComponent(S.token)), { redirect: 'follow' })
+      .then(function (r) { return r.json(); });
   } else {
-    payload.code = S.code;
+    payload.token = S.token; payload.code = S.code;
     // text/plain avoids a CORS preflight, which Apps Script does not answer
-    p = fetch(API, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+    p = fetch(API, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) })
+      .then(function (r) { return r.json(); });
   }
-  return p.then(function (r) { return r.json(); }).then(function (j) {
-    if (!j.ok) { var e = new Error(j.error || 'Request failed'); e.code = j.error; throw e; }
+  return p.then(function (j) {
+    if (!j.ok) { var e = new Error(errText(j.error)); e.code = j.error; throw e; }
     return j;
   });
 }
 
+function errText(code) {
+  return ({
+    WRONG_CODE: 'That team code is not right. Ask the head for the current one.',
+    WRONG_PIN: 'Wrong PIN. Check it and try again.',
+    LOCKED: 'Too many wrong PINs. Wait 15 minutes, or ask the admin to reset your PIN.',
+    NO_PIN: 'This account has no PIN yet. Choose "Create account" and use exactly this name to set one.',
+    FORBIDDEN: 'Only the admin or the head can do that.',
+    BAD_SESSION: 'You were logged out. Please log in again.'
+  })[code] || code || 'Request failed';
+}
+
+function setSession(token, me) {
+  S.token = token; store('mrt-token', token);
+  if (me) { S.me = me.name; S.role = me.role; store('mrt-last', me.name); }
+}
+
+function logoutLocal(msg) {
+  S.token = ''; store('mrt-token', null); S.me = ''; S.role = ''; S.open = null;
+  S.companies = []; S.log = []; S.comments = []; S.team = []; S.loginList = null; S.authMode = 'login';
+  S.error = msg || '';
+}
+
 function load(quiet) {
-  if (!DEMO && !S.code) { S.loaded = true; render(); return; }
+  if (!DEMO && !S.code) { S.loaded = true; render(); return Promise.resolve(); }
+  if (!S.token) {
+    return api('GET', { action: 'team' }).then(function (d) {
+      S.loginList = d; S.loaded = true;
+      if (d.needsAdmin) S.authMode = 'register';
+      render();
+    }).catch(fail);
+  }
   return api('GET').then(function (d) {
+    S.me = d.me.name; S.role = d.me.role;
     S.companies = d.companies; S.log = d.log; S.team = d.team; S.comments = d.comments || []; S.loaded = true; S.error = '';
     render();
-  }).catch(function (e) {
+  }).catch(fail);
+
+  function fail(e) {
     S.loaded = true;
-    if (e.code === 'WRONG_CODE') { S.code = ''; store('mrt-code', null); S.error = 'That team code is not right. Ask your tracker for the current one.'; }
-    else if (!quiet) S.error = 'Could not reach the tracker: ' + e.message + '. Check your connection and reload.';
+    if (e.code === 'WRONG_CODE') { S.code = ''; store('mrt-code', null); logoutLocal(e.message); render(); return; }
+    if (e.code === 'BAD_SESSION') { logoutLocal(e.message); return load(); }
+    if (!quiet) S.error = 'Could not reach the tracker: ' + e.message + '. Check your connection and reload.';
     render();
-  });
+  }
 }
 
 function save(payload, okMsg) {
   S.busy = true; renderSheet();
-  payload.raiser = S.me;
   return api('POST', payload).then(function (res) {
     S.busy = false;
     if (res.company) {
       var i = S.companies.findIndex(function (c) { return c.id === res.company.id; });
       if (i >= 0) S.companies[i] = res.company; else S.companies.push(res.company);
     }
-    toast(okMsg || 'Saved');
-    return load(true);
+    if (okMsg) toast(okMsg);
+    load(true);
+    return res;
   }).catch(function (e) {
-    S.busy = false; renderSheet();
-    toast(e.code === 'WRONG_CODE' ? 'Team code changed. Reload and enter the new one.' : 'Not saved: ' + e.message);
+    S.busy = false;
+    if (e.code === 'BAD_SESSION' || e.code === 'WRONG_CODE') { logoutLocal(e.message); load(); }
+    else { renderSheet(); toast('Not saved: ' + e.message); }
     throw e;
   });
 }
 
 /* ================= demo mode ================= */
+// Mirrors backend/Code.gs closely enough to try every screen. Every demo PIN starts as 1111.
 function demoApi(method, p) {
   var db = demoDb();
   var now = new Date().toISOString();
-  if (method === 'GET') return { ok: true, companies: db.companies, log: db.log.slice(-400), team: db.team, comments: db.comments };
-  if (p.action === 'comment') {
-    var cm = { id: 'M' + Date.now().toString(36), timestamp: now, author: p.raiser, to: p.to || 'Everyone', company_id: p.company_id || '', company: p.company || '', text: p.text, parent: p.parent || '', status: 'open' };
-    db.comments.push(cm); demoDb(db); return { ok: true, comment: cm };
+  var err = function (m) { return { ok: false, error: m }; };
+  var find = function (n) { return db.team.find(function (m) { return m.name.toLowerCase() === String(n || '').trim().toLowerCase(); }); };
+  var pinOf = function (m) { return m.pin || '1111'; };
+  var pinOk = function (x) { return /^[A-Za-z0-9]{4,12}$/.test(String(x || '')); };
+  var rank = { Raiser: 1, Tracker: 2, Admin: 3 };
+
+  if (method === 'GET' && p.action === 'team') {
+    var act = db.team.filter(function (m) { return m.active !== 'no'; });
+    return { ok: true, team: act.map(function (m) { return { name: m.name, role: m.role, hasPin: true }; }), needsAdmin: !act.some(function (m) { return m.role === 'Admin'; }) };
   }
-  if (p.action === 'commentStatus') {
-    var cx = db.comments.find(function (x) { return x.id === p.id; });
-    if (cx) cx.status = p.status; demoDb(db); return { ok: true };
+  if (p.action === 'login') {
+    var lm = find(p.name);
+    if (!lm || lm.active === 'no') return err('No active account with that name. Register first, or ask the admin.');
+    if (pinOf(lm) !== p.pin) return err('WRONG_PIN');
+    return { ok: true, token: 'demo:' + lm.name, me: { name: lm.name, role: lm.role } };
   }
-  if (p.action === 'addMember') {
-    if (!db.team.some(function (m) { return m.name.toLowerCase() === p.name.toLowerCase(); })) db.team.push({ name: p.name, role: p.role || 'Raiser', active: 'yes' });
-    demoDb(db); return { ok: true };
+  if (p.action === 'register') {
+    var nm = String(p.name || '').trim().replace(/\s+/g, ' ');
+    if (nm.length < 2) return err('Enter your name and surname (2–40 letters).');
+    if (!pinOk(p.pin)) return err('The PIN must be 4–12 letters or digits.');
+    if (find(nm)) return err('This name is already registered. Log in instead, or pick another name.');
+    var hasAdmin = db.team.some(function (m) { return m.role === 'Admin' && m.active !== 'no'; });
+    var nr = { name: nm, role: hasAdmin ? 'Raiser' : 'Admin', active: 'yes', pin: p.pin };
+    db.team.push(nr); demoDb(db);
+    return { ok: true, token: 'demo:' + nm, me: { name: nm, role: nr.role } };
   }
-  if (p.action === 'add') {
-    var id = 'D' + String(db.companies.length + 1).padStart(3, '0');
-    var c = { id: id, project: p.project, direction: p.direction, company: p.company, description: p.description || '', contact: p.contact || '', owner: p.owner || '', stage: 'New', next_step: '', next_date: '', last_update: now, last_note: '', created: now.slice(0, 10) };
-    db.companies.push(c);
-    db.log.push({ timestamp: now, company_id: id, company: c.company, raiser: p.raiser, action: 'Added company', stage_from: '', stage_to: 'New', note: '' });
-    demoDb(db); return { ok: true, company: c };
+
+  var me = find(String(S.token || '').replace(/^demo:/, ''));
+  if (!me || me.active === 'no') return err('BAD_SESSION');
+  var lead = rank[me.role] >= 2, admin = me.role === 'Admin';
+
+  if (method === 'GET') return {
+    ok: true, me: { name: me.name, role: me.role }, companies: db.companies, log: db.log.slice(-400), comments: db.comments,
+    team: db.team.filter(function (m) { return admin || m.active !== 'no'; }).map(function (m) { return { name: m.name, role: m.role, active: m.active || 'yes', hasPin: true }; })
+  };
+
+  switch (p.action) {
+    case 'logout': return { ok: true };
+    case 'changePin':
+      if (pinOf(me) !== p.oldPin) return err('WRONG_PIN');
+      if (!pinOk(p.newPin)) return err('The PIN must be 4–12 letters or digits.');
+      me.pin = p.newPin; demoDb(db); return { ok: true };
+    case 'setRole': case 'resetPin': case 'setActive': {
+      if (!admin) return err('FORBIDDEN');
+      var t = find(p.name); if (!t) return err('Person not found');
+      var admins = db.team.filter(function (m) { return m.role === 'Admin' && m.active !== 'no'; }).length;
+      if (p.action === 'setRole') {
+        if (t.role === 'Admin' && p.role !== 'Admin' && admins <= 1) return err('You are the only admin. Make someone else admin first.');
+        t.role = p.role; demoDb(db); return { ok: true };
+      }
+      if (p.action === 'resetPin') { t.pin = String(Math.floor(1000 + Math.random() * 9000)); demoDb(db); return { ok: true, pin: t.pin }; }
+      if (p.active === 'no') {
+        if (t.name === me.name) return err('You cannot remove yourself.');
+        if (t.role === 'Admin' && admins <= 1) return err('This is the only admin.');
+      }
+      t.active = p.active === 'yes' ? 'yes' : 'no';
+      var freed = 0;
+      if (t.active === 'no') db.companies.forEach(function (c) { if (c.owner === t.name) { c.owner = ''; freed++; } });
+      demoDb(db); return { ok: true, freed: freed };
+    }
+    case 'deleteCompany': {
+      if (!lead) return err('FORBIDDEN');
+      var di = db.companies.findIndex(function (x) { return x.id === p.id; });
+      if (di < 0) return err('Company not found. Reload the page.');
+      var gone = db.companies.splice(di, 1)[0];
+      db.deleted = (db.deleted || []).concat([Object.assign({ deleted_at: now, deleted_by: me.name }, gone)]);
+      db.log.push({ timestamp: now, company_id: gone.id, company: gone.company, raiser: me.name, action: 'Deleted company', stage_from: gone.stage, stage_to: '', note: '' });
+      demoDb(db); return { ok: true, deleted: gone.id };
+    }
+    case 'comment': {
+      if (!p.parent && !lead) return err('Only the head can start a comment. You can reply to one.');
+      var cm = { id: 'M' + Date.now().toString(36), timestamp: now, author: me.name, to: p.parent ? '' : (p.to || 'Everyone'), company_id: p.company_id || '', company: p.company || '', text: p.text, parent: p.parent || '', status: p.parent ? '' : 'open' };
+      db.comments.push(cm); demoDb(db); return { ok: true, comment: cm };
+    }
+    case 'commentStatus': {
+      var cx = db.comments.find(function (x) { return x.id === p.id; });
+      if (cx) cx.status = p.status; demoDb(db); return { ok: true };
+    }
+    case 'add': {
+      var id = 'D' + String(Date.now()).slice(-6);
+      var c = { id: id, project: p.project, direction: p.direction, company: p.company, description: p.description || '', contact: p.contact || '', owner: p.owner ? (lead ? p.owner : me.name) : '', stage: 'New', next_step: '', next_date: '', last_update: now, last_note: '', created: now.slice(0, 10) };
+      db.companies.push(c);
+      db.log.push({ timestamp: now, company_id: id, company: c.company, raiser: me.name, action: 'Added company', stage_from: '', stage_to: 'New', note: '' });
+      demoDb(db); return { ok: true, company: c };
+    }
   }
   var co = db.companies.find(function (x) { return x.id === p.id; });
+  if (!co) return err('Company not found. Reload the page.');
+  if ('owner' in p) {
+    var to = p.owner || '';
+    if (!(lead || to === me.name || (to === '' && co.owner === me.name))) return err('Only the head can take a company away from someone else.');
+    co.owner = to;
+  }
   var before = co.stage;
   if (p.stage) co.stage = p.stage;
-  if ('owner' in p) co.owner = p.owner || '';
   if ('next_step' in p) co.next_step = p.next_step || '';
   if ('next_date' in p) co.next_date = p.next_date || '';
   if (p.note) co.last_note = p.note;
-  if (p.action !== 'Took company' && p.action !== 'Released company') co.last_update = now;
-  db.log.push({ timestamp: now, company_id: co.id, company: co.company, raiser: p.raiser, action: p.action || 'Update', stage_from: before, stage_to: co.stage, note: p.note || '' });
+  if (!/^(Took company|Released company|Assigned to |Unassigned)/.test(String(p.action || ''))) co.last_update = now;
+  db.log.push({ timestamp: now, company_id: co.id, company: co.company, raiser: me.name, action: p.action || 'Update', stage_from: before, stage_to: co.stage, note: p.note || '' });
   demoDb(db); return { ok: true, company: co };
 }
 
 function demoDb(set) {
   if (set) { store('mrt-demo', JSON.stringify(set)); return set; }
   var raw = store('mrt-demo');
-  if (raw) { try { var db = JSON.parse(raw); if (!db.comments) db.comments = demoComments(); return db; } catch (e) {} }
+  if (raw) {
+    try {
+      var db = JSON.parse(raw);
+      if (!db.comments) db.comments = demoComments();
+      if (!db.team.some(function (m) { return m.role === 'Admin'; })) db.team.push({ name: 'Admin', role: 'Admin', active: 'yes' });
+      return db;
+    } catch (e) {}
+  }
   return demoDb(demoSeed());
 }
 
@@ -396,7 +519,7 @@ function demoSeed() {
     ['EWD', 'photobooth.moment', 'photo booth'], ['EWD', 'nu_art_studio', 'face painting, glitter bar'], ['EWD', 'chotam show', 'show'],
     ['EWD', 'psmaster.astana', 'PlayStation / Xbox'], ['EWD', 'erke.flowers', 'flowers'], ['EWD', 'koz.gallery', 'art hub']
   ];
-  var team = [{ name: 'Raiser A', role: 'Raiser', active: 'yes' }, { name: 'Raiser B', role: 'Raiser', active: 'yes' }, { name: 'Raiser C', role: 'Raiser', active: 'yes' }, { name: 'Tracker', role: 'Tracker', active: 'yes' }];
+  var team = [{ name: 'Raiser A', role: 'Raiser', active: 'yes' }, { name: 'Raiser B', role: 'Raiser', active: 'yes' }, { name: 'Raiser C', role: 'Raiser', active: 'yes' }, { name: 'Tracker', role: 'Tracker', active: 'yes' }, { name: 'Admin', role: 'Admin', active: 'yes' }];
   var plan = [ // owner index, stage, days since last update, next step offset in days (null = none)
     [0, 'Negotiating', 1, 1], [0, 'Offer sent', 3, -1], [0, 'Contacted', 8, null], [0, 'Confirmed', 2, null], [null, 'New', null, null], [0, 'Contacted', 0, 2],
     [1, 'Contacted', 2, 0], [1, 'Refused', 4, null], [1, 'Offer sent', 9, -3], [1, 'Negotiating', 1, 3], [null, 'New', null, null], [null, 'New', null, null],
@@ -478,24 +601,25 @@ var app = document.getElementById('app');
 function render() {
   if (!S.loaded) return;
   if (!DEMO && !S.code) return renderCodeGate();
-  if (!S.me || !S.team.some(function (m) { return m.name === S.me; })) return renderWhoGate();
+  if (!S.token || !S.me) return renderLoginGate();
 
   var mine = companies().filter(function (c) { return c.owner === S.me; });
   var due = mine.filter(function (c) { return isOverdue(c) || isStale(c); }).length;
   if (S.view === 'comments') markCommentsSeen();
   var tabs = [['my', 'My work', due], ['comments', 'Comments', unreadComments().length], ['all', 'All companies'], ['team', 'Team dashboard'], ['activity', 'Activity']];
-  if (['my', 'comments', 'all', 'team', 'activity'].indexOf(S.view) < 0) S.view = 'my';
+  if (S.role === 'Admin') tabs.push(['people', 'People']);
+  if (tabs.map(function (t) { return t[0]; }).indexOf(S.view) < 0) S.view = 'my';
 
   app.innerHTML =
     '<header class="top"><div class="top-in">' +
       '<div class="brand"><div class="brand-mark">MR</div><span>MR Tracker</span></div>' +
       '<select class="proj" id="proj" aria-label="Project">' + ['All'].concat(PROJECTS).map(function (p) { return '<option' + (p === S.project ? ' selected' : '') + ' value="' + esc(p) + '">' + (p === 'All' ? 'All projects' : esc(p)) + '</option>'; }).join('') + '</select>' +
-      '<div class="me"><button class="me-btn" id="switch" title="Switch person"><span class="avatar">' + esc(initials(S.me)) + '</span><span>' + esc(S.me) + '</span></button></div>' +
+      '<div class="me"><button class="me-btn" id="account" title="Your account"><span class="avatar">' + esc(initials(S.me)) + '</span><span>' + esc(S.me) + '</span></button></div>' +
     '</div>' +
     '<nav class="tabs" role="tablist">' + tabs.map(function (t) {
       return '<button class="tab" role="tab" data-view="' + t[0] + '" aria-selected="' + (S.view === t[0]) + '">' + t[1] + (t[2] ? '<span class="count hot">' + t[2] + '</span>' : '') + '</button>';
     }).join('') + '</nav></header>' +
-    (DEMO ? '<div style="padding:0 16px"><div class="banner"><span>Demo mode: sample data, saved only in this browser. Connect the Google Sheet in config.js to go live.</span><button id="reset-demo">Reset demo data</button></div></div>' : '') +
+    (DEMO ? '<div style="padding:0 16px"><div class="banner"><span>Demo mode: sample data, saved only in this browser. Every demo PIN is 1111.</span><button id="reset-demo">Reset demo data</button></div></div>' : '') +
     (S.error ? '<div style="padding:0 16px"><div class="banner" style="background:var(--bad-bg);color:var(--bad)">' + esc(S.error) + '</div></div>' : '') +
     '<main id="main"></main><div id="sheet-root"></div>';
 
@@ -505,6 +629,7 @@ function render() {
   if (S.view === 'team') main.innerHTML = viewTeam();
   if (S.view === 'activity') main.innerHTML = viewActivity();
   if (S.view === 'comments') main.innerHTML = viewComments();
+  if (S.view === 'people') main.innerHTML = viewPeople();
   renderSheet();
 }
 
@@ -519,22 +644,84 @@ function renderCodeGate() {
   document.getElementById('code-in').focus();
 }
 
-function renderWhoGate() {
-  var raisers = S.team.filter(function (m) { return m.role !== 'Tracker'; });
-  var trackers = S.team.filter(function (m) { return m.role === 'Tracker'; });
-  function pick(list) {
-    return '<div class="people-pick">' + list.map(function (m) { return '<button type="button" data-me="' + esc(m.name) + '"><span class="avatar">' + esc(initials(m.name)) + '</span><span>' + esc(m.name) + '</span></button>'; }).join('') + '</div>';
+function renderLoginGate() {
+  var L = S.loginList || { team: [], needsAdmin: false };
+  var names = L.team.map(function (m) { return m.name; }).sort(function (a, b) { return a.localeCompare(b); });
+  var last = store('mrt-last') || '';
+  var reg = S.authMode === 'register' || !names.length;
+  var head = '<div class="brand"><div class="brand-mark">MR</div>MR Tracker</div>';
+  var foot = (S.error ? '<div class="err" role="alert">' + esc(S.error) + '</div>' : '') +
+    (DEMO ? '<p class="muted" style="margin:0;font-size:13px">Demo mode: every demo PIN is <b>1111</b>. Try Raiser A, Tracker or Admin.</p>' : '') +
+    (!DEMO ? '<button type="button" class="btn ghost small" id="change-code" style="justify-self:start;padding-left:0">Use a different team code</button>' : '');
+
+  if (reg) {
+    app.innerHTML = '<div style="padding:0 16px"><form class="gate" id="register-form">' + head +
+      '<h1>Create your account</h1>' +
+      (L.needsAdmin
+        ? '<p class="muted" style="margin:0">You are the first person here, so this account becomes the <b>Admin</b>. You will be able to remove people, change roles and reset PINs.</p>'
+        : '<p class="muted" style="margin:0">New accounts start as raisers. The admin can make you head if needed.</p>') +
+      '<div class="field"><label for="r-name">Name and surname</label><input class="input" id="r-name" autocomplete="name" required maxlength="40"></div>' +
+      '<div class="row2"><div class="field"><label for="r-pin">Choose a PIN</label><input class="input" id="r-pin" type="password" autocomplete="new-password" required minlength="4" maxlength="12" placeholder="4–12 digits or letters"></div>' +
+      '<div class="field"><label for="r-pin2">Repeat the PIN</label><input class="input" id="r-pin2" type="password" autocomplete="new-password" required minlength="4" maxlength="12"></div></div>' +
+      '<p class="muted" style="margin:0;font-size:13px">Only you know your PIN. Nobody else can log in as you or sign updates with your name.</p>' +
+      '<button class="btn primary" type="submit" ' + (S.busy ? 'disabled' : '') + '>' + (S.busy ? 'Creating…' : 'Create account') + '</button>' +
+      (names.length ? '<button type="button" class="btn ghost" data-auth="login">I already have an account</button>' : '') +
+      foot + '</form></div>';
+    var rn = document.getElementById('r-name'); if (rn) rn.focus();
+    return;
   }
-  app.innerHTML = '<div style="padding:0 16px"><div class="gate">' +
-    '<div class="brand"><div class="brand-mark">MR</div>MR Tracker</div>' +
-    '<h1>Who are you?</h1><p class="muted" style="margin:0">Updates you make are signed with this name. You can switch later.</p>' +
-    (raisers.length ? '<div class="field"><label>Raisers</label>' + pick(raisers) + '</div>' : '') +
-    (trackers.length ? '<div class="field"><label>Head and trackers</label>' + pick(trackers) + '</div>' : '') +
-    '<form id="new-me" class="field"><label for="new-name">Not on the list? Add yourself</label>' +
-    '<div style="display:flex;gap:6px;flex-wrap:wrap"><input class="input" id="new-name" placeholder="Name Surname" required style="flex:1 1 160px">' +
-    '<select class="input" id="new-role" style="flex:0 0 150px"><option value="Raiser">Raiser</option><option value="Tracker">Head / Tracker</option></select>' +
-    '<button class="btn primary" type="submit">Add</button></div></form>' +
-    (S.error ? '<div class="err">' + esc(S.error) + '</div>' : '') + '</div></div>';
+  app.innerHTML = '<div style="padding:0 16px"><form class="gate" id="login-form">' + head +
+    '<h1>Log in</h1>' +
+    '<div class="field"><label for="l-name">Your name</label><select class="input" id="l-name" required>' +
+      '<option value="">Choose your name</option>' + names.map(function (n) { return opt(n, n, last); }).join('') + '</select></div>' +
+    '<div class="field"><label for="l-pin">PIN</label><input class="input" id="l-pin" type="password" autocomplete="current-password" required maxlength="12"></div>' +
+    '<button class="btn primary" type="submit" ' + (S.busy ? 'disabled' : '') + '>' + (S.busy ? 'Checking…' : 'Log in') + '</button>' +
+    '<button type="button" class="btn ghost" data-auth="register">New here? Create an account</button>' +
+    '<p class="muted" style="margin:0;font-size:13px">Forgot your PIN? Ask the admin to reset it.</p>' +
+    foot + '</form></div>';
+  var focus = document.getElementById(last && names.indexOf(last) >= 0 ? 'l-pin' : 'l-name'); if (focus) focus.focus();
+}
+
+/* ================= view: people (admin only) ================= */
+function viewPeople() {
+  var h = '<p class="lede">People</p><p class="muted" style="margin:0 0 12px">Change roles, reset a forgotten PIN, or remove someone who left. Removing a person logs them out, frees their companies and keeps their past updates in the history.</p>';
+  if (S.resetResult) {
+    h += '<div class="nudge" role="status"><span>New PIN for ' + esc(S.resetResult.name) + ': <span class="num" style="font-size:18px;user-select:all">' + esc(S.resetResult.pin) + '</span>. Tell them in person or in a private message. They can change it under their name at the top right.</span><button class="btn small" data-dismiss-reset>Done</button></div>';
+  }
+  var people = S.team.slice().sort(function (a, b) { return (a.active === 'no') - (b.active === 'no') || a.name.localeCompare(b.name); });
+  h += '<div class="tbl-wrap"><table class="people"><thead><tr><th>Person</th><th>Role</th><th class="num hide-sm">Companies</th><th class="hide-sm">Last update</th><th></th></tr></thead><tbody>' +
+    people.map(function (m) {
+      var off = m.active === 'no', you = m.name === S.me;
+      var own = S.companies.filter(function (c) { return c.owner === m.name; }).length;
+      var last = S.log.filter(function (l) { return l.raiser === m.name; }).reduce(function (a, l) { return l.timestamp > a ? l.timestamp : a; }, '');
+      var cf = S.confirm && S.confirm.name === m.name ? S.confirm.kind : '';
+      var acts;
+      if (off) acts = '<button class="btn small" data-person="restore" data-name="' + esc(m.name) + '">Restore</button>';
+      else if (cf === 'remove') acts = '<span style="font-size:13px">Remove ' + esc(m.name) + '?</span> <button class="btn small" style="color:var(--bad);border-color:var(--bad)" data-person="remove-yes" data-name="' + esc(m.name) + '">Remove</button> <button class="btn small ghost" data-person="cancel">Cancel</button>';
+      else if (cf === 'reset') acts = '<span style="font-size:13px">Give a new PIN?</span> <button class="btn small primary" data-person="reset-yes" data-name="' + esc(m.name) + '">Reset PIN</button> <button class="btn small ghost" data-person="cancel">Cancel</button>';
+      else acts = '<button class="btn small" data-person="reset" data-name="' + esc(m.name) + '">Reset PIN</button>' + (you ? '' : ' <button class="btn small ghost" style="color:var(--bad)" data-person="remove" data-name="' + esc(m.name) + '">Remove</button>');
+      return '<tr' + (off ? ' style="opacity:.55"' : '') + '><td class="who"><span class="avatar">' + esc(initials(m.name)) + '</span>' + esc(m.name) + (you ? ' <span class="muted">(you)</span>' : '') + (off ? ' <span class="chip">removed</span>' : '') + '</td>' +
+        '<td>' + (off ? esc(roleLabel(m.role)) : '<select class="input" style="width:auto;padding:5px 8px" data-role-of="' + esc(m.name) + '" aria-label="Role of ' + esc(m.name) + '">' +
+          ['Raiser', 'Tracker', 'Admin'].map(function (r) { return opt(r, roleLabel(r), m.role); }).join('') + '</select>') + '</td>' +
+        '<td class="num hide-sm">' + own + '</td><td class="hide-sm muted">' + esc(ago(last)) + '</td>' +
+        '<td style="text-align:right;white-space:nowrap">' + acts + '</td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<p class="muted" style="font-size:13px;margin-top:10px"><b>Raiser</b> logs work and replies to comments. <b>Head</b> also writes comments, assigns and deletes companies. <b>Admin</b> also manages this page.</p>';
+  return h;
+}
+function roleLabel(r) { return r === 'Tracker' ? 'Head' : (r || 'Raiser'); }
+
+/* ================= account sheet ================= */
+function accountSheet() {
+  return '<div class="scrim" data-scrim><form class="sheet" id="pin-form" role="dialog" aria-modal="true" aria-labelledby="acc-title">' +
+    '<div class="sheet-head"><div><h3 id="acc-title">' + esc(S.me) + '</h3><div style="margin-top:6px"><span class="chip">' + esc(roleLabel(S.role)) + '</span></div></div><button type="button" class="close" data-close aria-label="Close">×</button></div>' +
+    '<div class="box"><div class="box-title">Change your PIN</div>' +
+      '<div class="field"><label for="p-old">Current PIN</label><input class="input" id="p-old" type="password" autocomplete="current-password" required maxlength="12"></div>' +
+      '<div class="row2"><div class="field"><label for="p-new">New PIN</label><input class="input" id="p-new" type="password" autocomplete="new-password" required minlength="4" maxlength="12"></div>' +
+      '<div class="field"><label for="p-new2">Repeat new PIN</label><input class="input" id="p-new2" type="password" autocomplete="new-password" required minlength="4" maxlength="12"></div></div>' +
+      '<div><button class="btn primary" type="submit" ' + (S.busy ? 'disabled' : '') + '>Change PIN</button></div></div>' +
+    '<button type="button" class="btn" id="logout" style="padding:12px">Log out on this device</button>' +
+  '</form></div>';
 }
 
 /* ================= view: my work ================= */
@@ -558,7 +745,7 @@ function viewMy() {
   if (!mine.length) {
     var free = companies().filter(function (c) { return !c.owner; }).length;
     return '<p class="lede">Hi, ' + esc(S.me.split(' ')[0]) + '.</p>' + commentNudge() +
-      (me.role === 'Tracker' ? '<p class="muted">You are signed in as a tracker. The <b>Team dashboard</b> tab shows how everyone is doing.</p>' : '') +
+      (isTracker() ? '<p class="muted">You are logged in as ' + esc(roleLabel(S.role).toLowerCase()) + '. The <b>Team dashboard</b> tab shows how everyone is doing.</p>' : '') +
       '<div class="empty"><strong>You have no companies yet</strong>Open <b>All companies</b>, pick the ones you will raise and press <b>Take</b>. ' + free + ' companies are still unassigned.' +
       '<div style="margin-top:12px"><button class="btn primary" data-goto="all">Find companies to take</button></div></div>';
   }
@@ -646,7 +833,7 @@ function viewTeam() {
     kpi(no, 'Refused', cs.length ? Math.round(no / Math.max(1, yes + no) * 100) + '% of closed' : '') + '</div>';
 
   // raisers
-  var people = S.team.filter(function (m) { return m.role !== 'Tracker' || cs.some(function (c) { return c.owner === m.name; }); }).map(function (m) {
+  var people = S.team.filter(function (m) { return m.active !== 'no' && (!isTracker(m.name) || cs.some(function (c) { return c.owner === m.name; })); }).map(function (m) {
     var own = cs.filter(function (c) { return c.owner === m.name; });
     var mylog = log.filter(function (l) { return l.raiser === m.name; });
     var last = mylog.reduce(function (a, l) { return l.timestamp > a ? l.timestamp : a; }, '');
@@ -719,7 +906,12 @@ function viewActivity() {
 /* ================= view: comments ================= */
 // The head and trackers write comments to one raiser or to everyone, optionally about a company.
 // Raisers see what is addressed to them, reply, and mark comments done.
-function isTracker(name) { var m = S.team.find(function (x) { return x.name === (name || S.me); }); return !!m && m.role === 'Tracker'; }
+// "Lead" = the head (Tracker role) or the Admin: can write comments, assign and delete companies
+function isTracker(name) {
+  if (!name || name === S.me) return S.role === 'Tracker' || S.role === 'Admin';
+  var m = S.team.find(function (x) { return x.name === name; });
+  return !!m && (m.role === 'Tracker' || m.role === 'Admin');
+}
 function seenKey() { return 'mrt-seen-' + S.me; }
 function topVisible(c) { return isTracker() || c.author === S.me || c.to === S.me || c.to === 'Everyone' || !c.to; }
 function threads() { return S.comments.filter(function (c) { return !c.parent && topVisible(c); }); }
@@ -767,7 +959,7 @@ function viewComments() {
   var tr = isTracker();
   var h = '';
   if (tr) {
-    var raisers = S.team.filter(function (m) { return m.role !== 'Tracker'; });
+    var raisers = S.team.filter(function (m) { return m.active !== 'no' && !isTracker(m.name); });
     h += '<form class="panel composer" id="c-form"><div class="box-title">Write a comment</div>' +
       '<div class="row2"><div class="field"><label for="c-to">To</label><select class="input" id="c-to">' + opt('Everyone', 'Everyone', '') + raisers.map(function (m) { return opt(m.name, m.name, ''); }).join('') + '</select></div>' +
       '<div class="field"><label for="c-co">About a company <span style="font-weight:400">(optional)</span></label><input class="input" id="c-co" list="co-list" placeholder="Start typing a name" autocomplete="off">' +
@@ -801,14 +993,16 @@ function openCompany(id) {
   renderSheet();
 }
 function openAdd() { S.open = '__add'; S.draft = { company: '', direction: S.fDir !== 'All' ? S.fDir : DIRS[0], project: S.project !== 'All' ? S.project : PROJECTS[0], description: '', contact: '', mine: true }; renderSheet(); }
-function closeSheet() { S.open = null; S.draft = null; renderSheet(); }
+function closeSheet() { S.open = null; S.draft = null; S.confirm = null; renderSheet(); }
 
 function renderSheet() {
   var root = document.getElementById('sheet-root'); if (!root) return;
   if (!S.open) { root.innerHTML = ''; root.removeAttribute('data-for'); return; }
   var focusId = document.activeElement && document.activeElement.id;
   var old = root.querySelector('.sheet'), top = old ? old.scrollTop : 0, sameKey = root.getAttribute('data-for') === S.open;
-  if (S.open === '__add') root.innerHTML = addSheet(); else root.innerHTML = companySheet();
+  if (S.open === '__add') root.innerHTML = addSheet();
+  else if (S.open === '__me') root.innerHTML = accountSheet();
+  else root.innerHTML = companySheet();
   root.setAttribute('data-for', S.open);
   var sh = root.querySelector('.sheet');
   if (sh) { if (old && sameKey) sh.scrollTop = top; else sh.classList.add('enter'); }
@@ -820,9 +1014,21 @@ function companySheet() {
   var d = S.draft, mine = c.owner === S.me;
   var hist = S.log.filter(function (l) { return l.company_id === c.id; }).slice().reverse().slice(0, 12);
   var changed = d.action || d.note.trim() || d.stage !== (c.stage || 'New') || d.next_step !== (c.next_step || '') || d.next_date !== (c.next_date || '');
+  var lead = isTracker();
   var owner = c.owner
-    ? '<span>Raiser: <b>' + esc(c.owner) + '</b></span>' + (mine ? '<button class="btn small ghost" data-release="' + esc(c.id) + '">Release</button>' : '<button class="btn small" data-take="' + esc(c.id) + '">Take over</button>')
+    ? '<span>Raiser: <b>' + esc(c.owner) + '</b></span>' + (mine ? '<button class="btn small ghost" data-release="' + esc(c.id) + '">Release</button>' : '')
     : '<span class="muted">Nobody is raising this company yet.</span><button class="btn small primary" data-take="' + esc(c.id) + '">Take it</button>';
+  if (lead) {
+    owner += '<label style="display:flex;gap:6px;align-items:center;font-size:13px;width:100%">Assign to <select class="input" id="assign" style="width:auto;padding:5px 8px">' +
+      opt('', 'Nobody', c.owner || '') + S.team.filter(function (m) { return m.active !== 'no'; }).map(function (m) { return opt(m.name, m.name, c.owner || ''); }).join('') + '</select></label>';
+  }
+  var del = '';
+  if (lead) {
+    del = S.confirm && S.confirm.kind === 'delete' && S.confirm.id === c.id
+      ? '<div class="box" style="border-color:var(--bad)"><div><b>Delete ' + esc(c.company) + '?</b> It disappears from the tracker and moves to the <b>Deleted</b> tab of the Google Sheet, so it can be put back from there.</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" style="color:var(--bad);border-color:var(--bad)" data-delete-yes="' + esc(c.id) + '">Delete company</button><button class="btn ghost" data-confirm-cancel>Cancel</button></div></div>'
+      : '<button class="btn ghost" style="color:var(--bad);justify-self:start" data-delete="' + esc(c.id) + '">Delete this company</button>';
+  }
 
   return '<div class="scrim" data-scrim><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-title">' +
     '<div class="sheet-head"><div><h3 id="sh-title">' + esc(c.company) + '</h3><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' + pill(c.stage) + '<span class="chip">' + esc(c.direction) + '</span><span class="chip">' + esc(c.project) + '</span></div></div><button class="close" data-close aria-label="Close">×</button></div>' +
@@ -842,6 +1048,7 @@ function companySheet() {
     '<div class="box"><div class="box-title">History</div>' + (hist.length ? '<div class="hist">' + hist.map(function (l) {
       return '<div class="h"><b>' + esc(l.action) + '</b> · ' + esc(l.raiser) + ' <span class="muted">· ' + esc(ago(l.timestamp)) + '</span>' + (l.stage_from !== l.stage_to && l.stage_to ? ' ' + pill(l.stage_to) : '') + (l.note ? '<div class="muted" style="white-space:pre-wrap">' + esc(l.note) + '</div>' : '') + '</div>';
     }).join('') + '</div>' : '<div class="muted" style="font-size:14px">No updates yet.</div>') + '</div>' +
+    del +
   '</div></div>';
 }
 
@@ -879,9 +1086,36 @@ document.addEventListener('click', function (e) {
 
   if (ds.view) { location.hash = ds.view; return; }
   if (ds.goto) { location.hash = ds.goto; return; }
-  if (t.id === 'switch') { S.me = ''; store('mrt-me', null); render(); return; }
+  if (t.id === 'account') { S.open = '__me'; renderSheet(); return; }
+  if (t.id === 'logout') {
+    var tok = S.token;
+    api('POST', { action: 'logout', token: tok }).catch(function () {});
+    logoutLocal(''); load(); toast('Logged out'); return;
+  }
+  if (t.id === 'change-code') { S.code = ''; store('mrt-code', null); logoutLocal(''); render(); return; }
   if (t.id === 'reset-demo') { store('mrt-demo', null); load(); toast('Demo data reset'); return; }
-  if (ds.me) { S.me = ds.me; store('mrt-me', ds.me); S.error = ''; render(); return; }
+  if (ds.auth) { S.authMode = ds.auth; S.error = ''; render(); return; }
+  if ('confirmCancel' in ds) { S.confirm = null; renderSheet(); return; }
+  if (ds.delete) { S.confirm = { kind: 'delete', id: ds.delete }; renderSheet(); return; }
+  if (ds.deleteYes) {
+    var dc = byId(ds.deleteYes);
+    save({ action: 'deleteCompany', id: ds.deleteYes }, 'Deleted ' + (dc ? dc.company : 'company')).then(function () {
+      S.companies = S.companies.filter(function (c) { return c.id !== ds.deleteYes; });
+      S.confirm = null; closeSheet(); render();
+    }, function () {});
+    return;
+  }
+  if ('dismissReset' in ds) { S.resetResult = null; render(); return; }
+  if (ds.person) {
+    var who = ds.name;
+    if (ds.person === 'cancel') { S.confirm = null; render(); return; }
+    if (ds.person === 'remove' || ds.person === 'reset') { S.confirm = { kind: ds.person, name: who }; render(); return; }
+    S.confirm = null;
+    if (ds.person === 'remove-yes') save({ action: 'setActive', name: who, active: 'no' }).then(function (r) { toast(who + ' removed' + (r.freed ? '. ' + r.freed + ' companies are unassigned now.' : '')); }, function () {});
+    if (ds.person === 'restore') save({ action: 'setActive', name: who, active: 'yes' }, who + ' restored').catch(function () {});
+    if (ds.person === 'reset-yes') save({ action: 'resetPin', name: who }).then(function (r) { S.resetResult = { name: who, pin: r.pin }; render(); }, function () {});
+    return;
+  }
   if (ds.take) {
     e.stopPropagation();
     var co = byId(ds.take);
@@ -958,6 +1192,14 @@ document.addEventListener('change', function (e) {
     var sel = document.getElementById('c-to');
     if (pc && pc.owner && sel && [].some.call(sel.options, function (o) { return o.value === pc.owner; })) sel.value = pc.owner;
   }
+  if (id === 'assign' && S.open) {
+    var ac = byId(S.open);
+    save({ action: v ? 'Assigned to ' + v : 'Unassigned', id: S.open, owner: v }, v ? ac.company + ' assigned to ' + v : 'Nobody is raising ' + ac.company + ' now').catch(function () {});
+  }
+  if (e.target.dataset && e.target.dataset.roleOf) {
+    var rn = e.target.dataset.roleOf;
+    save({ action: 'setRole', name: rn, role: v }, rn + ' is now ' + roleLabel(v)).catch(function () { render(); });
+  }
   if (S.draft && id === 'a-dir') S.draft.direction = v;
   if (S.draft && id === 'a-proj') S.draft.project = v;
   if (S.draft && id === 'a-mine') S.draft.mine = e.target.checked;
@@ -975,13 +1217,32 @@ document.addEventListener('submit', function (e) {
   if (e.target.id === 'code-form') {
     S.code = document.getElementById('code-in').value.trim(); store('mrt-code', S.code); S.error = ''; S.loaded = false;
     app.innerHTML = '<div class="loading">Checking…</div>'; load();
+    return;
   }
-  if (e.target.id === 'new-me') {
-    var name = document.getElementById('new-name').value.trim().replace(/\s+/g, ' ');
-    var role = document.getElementById('new-role').value;
-    if (!name) return;
-    api('POST', { action: 'addMember', name: name, role: role }).then(function () { S.me = name; store('mrt-me', name); return load(); })
-      .catch(function (err) { S.error = 'Could not add you: ' + err.message; render(); });
+  if (e.target.id === 'login-form' || e.target.id === 'register-form') {
+    var isReg = e.target.id === 'register-form';
+    var name = document.getElementById(isReg ? 'r-name' : 'l-name').value.trim().replace(/\s+/g, ' ');
+    var pin = document.getElementById(isReg ? 'r-pin' : 'l-pin').value.trim();
+    if (!name) { S.error = 'Choose your name first.'; render(); return; }
+    if (isReg && pin !== document.getElementById('r-pin2').value.trim()) { S.error = 'The two PINs are different. Type them again.'; render(); return; }
+    S.busy = true; S.error = ''; render();
+    api('POST', { action: isReg ? 'register' : 'login', name: name, pin: pin }).then(function (r) {
+      S.busy = false; setSession(r.token, r.me); S.loaded = false;
+      app.innerHTML = '<div class="loading">Loading…</div>';
+      return load().then(function () { toast(isReg ? 'Welcome, ' + r.me.name + (r.me.role === 'Admin' ? '. You are the admin.' : '') : 'Logged in'); });
+    }).catch(function (err) {
+      S.busy = false; S.error = err.message;
+      if (err.code === 'WRONG_CODE') { S.code = ''; store('mrt-code', null); }
+      render();
+    });
+    return;
+  }
+  if (e.target.id === 'pin-form') {
+    var oldPin = document.getElementById('p-old').value.trim(), np = document.getElementById('p-new').value.trim();
+    if (np !== document.getElementById('p-new2').value.trim()) { toast('The two new PINs are different'); return; }
+    if (!/^[A-Za-z0-9]{4,12}$/.test(np)) { toast('The PIN must be 4–12 letters or digits'); return; }
+    save({ action: 'changePin', oldPin: oldPin, newPin: np }, 'PIN changed').then(closeSheet, function () {});
+    return;
   }
   if (e.target.id === 'c-form') {
     var text = document.getElementById('c-text').value.trim();
