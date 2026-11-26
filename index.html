@@ -10,15 +10,18 @@
 <style>
 /* Layout: sticky top bar + tab row; one content column (max 1080px); detail opens as a bottom sheet on phones, side panel on desktop. */
 :root {
-  --bg: #f3f5f2;
+  --bg: #f1f5fa;
   --surface: #ffffff;
-  --sunk: #e9ece7;
-  --line: #d9ded6;
-  --ink: #17211d;
-  --muted: #5d6a63;
-  --accent: #1d5f4f;
+  --sunk: #e6edf5;
+  --line: #dbe3ec;
+  --ink: #14202e;
+  --muted: #5a6878;
+  --accent: #037ef3;
   --accent-ink: #ffffff;
-  --accent-soft: #dcebe5;
+  --accent-soft: #e1effe;
+  /* AIESEC logo: image.png holds the original variants side by side, each shown as-is.
+     Light theme hangs the white tile, dark theme the blue one. */
+  --logo-hang-x: -39px;
 
   --s-new: #7b8580;      --s-new-bg: #eceeec;
   --s-contacted: #2f63b8; --s-contacted-bg: #e2eafa;
@@ -35,10 +38,10 @@
   --r: 10px;
   color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #111715; --surface: #18201d; --sunk: #0d1311; --line: #2a3531; --ink: #e6ece8; --muted: #93a19a;
-    --accent: #5fbf9f; --accent-ink: #0d1311; --accent-soft: #1d3a31;
+html[data-theme="dark"] {
+    --bg: #0f141b; --surface: #161d26; --sunk: #0b1016; --line: #26313e; --ink: #e5ebf2; --muted: #93a0b0;
+    --accent: #3d9bff; --accent-ink: #ffffff; --accent-soft: #14304f;
+    --logo-hang-x: -278px;
     --s-new: #a3ada8; --s-new-bg: #252d2a;
     --s-contacted: #8db3f5; --s-contacted-bg: #1d2a42;
     --s-offer: #b9a1ef; --s-offer-bg: #2a2340;
@@ -47,7 +50,6 @@
     --s-no: #f08a84; --s-no-bg: #3d1f1d;
     --warn: #f0b453; --warn-bg: #3a2c14; --bad: #f08a84; --bad-bg: #3d1f1d; --good: #6fd394; --good-bg: #173523;
     color-scheme: dark;
-  }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
@@ -64,7 +66,22 @@ button { cursor: pointer; }
   padding: env(safe-area-inset-top, 0px) max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); }
 .top-in { max-width: 1080px; margin: 0 auto; display: flex; align-items: center; gap: 12px; min-height: 56px; flex-wrap: wrap; }
 .brand { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; margin-right: auto; }
-.brand-mark { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+.logo-tile { --s: 1; width: calc(167px * var(--s)); height: calc(276px * var(--s)); flex: none;
+  background: url("image.png") no-repeat calc(var(--x, -39px) * var(--s)) calc(-24px * var(--s)) / calc(721px * var(--s)) calc(330px * var(--s));
+  border-radius: 0 0 calc(19px * var(--s)) calc(19px * var(--s)); }
+.brand-mark { --s: .116; --x: -278px; }
+.theme-btn { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; width: 34px; height: 34px; display: grid; place-items: center; font-size: 16px; line-height: 1; padding: 0; }
+.theme-btn:hover { border-color: var(--accent); }
+/* The AIESEC tile hangs from the top bar in the empty space beside the content on wide screens */
+body::before { content: ""; position: fixed; top: var(--top-h, 101px); right: calc((100vw - 1080px) / 4 - 84px); width: 167px; height: 276px;
+  background: url("image.png") no-repeat var(--logo-hang-x) -24px / 721px 330px; border-radius: 0 0 19px 19px;
+  box-shadow: 0 12px 26px rgba(3, 126, 243, .16); pointer-events: none; z-index: 0; display: none; }
+@media (min-width: 1500px) { body::before { display: block; } }
+html.gated body::before { display: none; }
+@media (max-width: 560px) { .theme-btn { display: none; } }
+#app, .top { position: relative; z-index: 1; }
+.top { position: sticky; }
+.gate-logo { --s: .43; --x: var(--logo-hang-x); margin: 0 auto -2px; box-shadow: 0 8px 18px rgba(3, 126, 243, .16); }
 .me { display: flex; align-items: center; gap: 8px; }
 .me-btn { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 12px 5px 6px; display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .avatar { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 11px; font-weight: 700; flex: none; }
@@ -608,6 +625,12 @@ function toast(msg) {
 
 /* ================= render: shell ================= */
 var app = document.getElementById('app');
+function theme() { return store('mrt-theme') === 'dark' ? 'dark' : 'light'; }
+// keeps the hanging logo right under the top bar, whatever its height
+function syncTop() { var t = document.querySelector('.top'); if (t) document.documentElement.style.setProperty('--top-h', t.offsetHeight + 'px'); }
+window.addEventListener('resize', syncTop);
+function applyTheme() { document.documentElement.setAttribute('data-theme', theme()); }
+applyTheme();
 
 function render() {
   if (!S.loaded) return;
@@ -623,9 +646,9 @@ function render() {
 
   app.innerHTML =
     '<header class="top"><div class="top-in">' +
-      '<div class="brand"><div class="brand-mark">MR</div><span>MR Tracker</span></div>' +
+      '<div class="brand"><div class="logo-tile brand-mark" role="img" aria-label="AIESEC"></div><span>MR Tracker</span></div>' +
       '<select class="proj" id="proj" aria-label="Project">' + ['All'].concat(PROJECTS).map(function (p) { return '<option' + (p === S.project ? ' selected' : '') + ' value="' + esc(p) + '">' + (p === 'All' ? 'All projects' : esc(p)) + '</option>'; }).join('') + '</select>' +
-      '<div class="me"><button class="me-btn" id="account" title="Your account"><span class="avatar">' + esc(initials(S.me)) + '</span><span>' + esc(S.me) + '</span></button></div>' +
+      '<div class="me"><button class="theme-btn" id="theme" title="' + (theme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme') + '" aria-label="Switch theme">' + (theme() === 'dark' ? '☀' : '☾') + '</button><button class="me-btn" id="account" title="Your account"><span class="avatar">' + esc(initials(S.me)) + '</span><span>' + esc(S.me) + '</span></button></div>' +
     '</div>' +
     '<nav class="tabs" role="tablist">' + tabs.map(function (t) {
       return '<button class="tab" role="tab" data-view="' + t[0] + '" aria-selected="' + (S.view === t[0]) + '">' + t[1] + (t[2] ? '<span class="count hot">' + t[2] + '</span>' : '') + '</button>';
@@ -642,12 +665,15 @@ function render() {
   if (S.view === 'comments') main.innerHTML = viewComments();
   if (S.view === 'people') main.innerHTML = viewPeople();
   renderSheet();
+  document.documentElement.classList.remove('gated');
+  syncTop();
 }
 
 /* ================= gates ================= */
 function renderCodeGate() {
+  document.documentElement.classList.add('gated');
   app.innerHTML = '<div style="padding:0 16px"><form class="gate" id="code-form">' +
-    '<div class="brand"><div class="brand-mark">MR</div>MR Tracker</div>' +
+    '<div class="logo-tile gate-logo" role="img" aria-label="AIESEC"></div><div class="brand" style="justify-content:center;margin:0">MR Tracker</div>' +
     '<h1>Enter the team code</h1><p class="muted" style="margin:0">Your tracker gives this code to everyone in Business Development. You enter it once on each device.</p>' +
     '<div class="field"><label for="code-in">Team code</label><input class="input" id="code-in" autocomplete="off" required></div>' +
     (S.error ? '<div class="err">' + esc(S.error) + '</div>' : '') +
@@ -656,11 +682,12 @@ function renderCodeGate() {
 }
 
 function renderLoginGate() {
+  document.documentElement.classList.add('gated');
   var L = S.loginList || { team: [], needsAdmin: false };
   var names = L.team.map(function (m) { return m.name; }).sort(function (a, b) { return a.localeCompare(b); });
   var last = store('mrt-last') || '';
   var reg = S.authMode === 'register' || !names.length;
-  var head = '<div class="brand"><div class="brand-mark">MR</div>MR Tracker</div>';
+  var head = '<div class="logo-tile gate-logo" role="img" aria-label="AIESEC"></div><div class="brand" style="justify-content:center;margin:0">MR Tracker</div>';
   var foot = (S.error ? '<div class="err" role="alert">' + esc(S.error) + '</div>' : '') +
     (DEMO ? '<p class="muted" style="margin:0;font-size:13px">Demo mode: every demo PIN is <b>1111</b>. Try Raiser A, Tracker or Admin.</p>' : '') +
     (!DEMO ? '<button type="button" class="btn ghost small" id="change-code" style="justify-self:start;padding-left:0">Use a different team code</button>' : '');
@@ -731,6 +758,8 @@ function accountSheet() {
       '<div class="row2"><div class="field"><label for="p-new">New PIN</label><input class="input" id="p-new" type="password" autocomplete="new-password" required minlength="4" maxlength="12"></div>' +
       '<div class="field"><label for="p-new2">Repeat new PIN</label><input class="input" id="p-new2" type="password" autocomplete="new-password" required minlength="4" maxlength="12"></div></div>' +
       '<div><button class="btn primary" type="submit" ' + (S.busy ? 'disabled' : '') + '>Change PIN</button></div></div>' +
+    '<div class="box"><div class="box-title">Theme</div><div class="seg" role="group" aria-label="Theme" style="justify-self:start">' +
+      [['light', 'Light'], ['dark', 'Dark']].map(function (o) { return '<button type="button" data-set-theme="' + o[0] + '" aria-pressed="' + (theme() === o[0]) + '">' + o[1] + '</button>'; }).join('') + '</div></div>' +
     '<button type="button" class="btn" id="logout" style="padding:12px">Log out on this device</button>' +
   '</form></div>';
 }
@@ -1124,6 +1153,7 @@ document.addEventListener('click', function (e) {
 
   if (ds.view) { location.hash = ds.view; return; }
   if (ds.goto) { location.hash = ds.goto; return; }
+  if (t.id === 'theme' || ds.setTheme) { store('mrt-theme', ds.setTheme || (theme() === 'dark' ? 'light' : 'dark')); applyTheme(); render(); return; }
   if (t.id === 'account') { S.open = '__me'; renderSheet(); return; }
   if (t.id === 'logout') {
     var tok = S.token;
