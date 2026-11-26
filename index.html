@@ -478,6 +478,17 @@ function demoApi(method, p) {
   }
   var co = db.companies.find(function (x) { return x.id === p.id; });
   if (!co) return err('Company not found. Reload the page.');
+  if (p.action === 'editCompany') {
+    var name = String(p.company || '').trim();
+    if (!name) return err('Company name cannot be empty.');
+    var ch = [];
+    if (name !== co.company) ch.push('name: ' + co.company + ' → ' + name);
+    if ((p.description || '') !== (co.description || '')) ch.push('description');
+    if ((p.contact || '') !== (co.contact || '')) ch.push('contacts: ' + (p.contact || '—'));
+    co.company = name; co.description = p.description || ''; co.contact = p.contact || '';
+    db.log.push({ timestamp: now, company_id: co.id, company: co.company, raiser: me.name, action: 'Edited details', stage_from: co.stage, stage_to: co.stage, note: ch.join('; ') });
+    demoDb(db); return { ok: true, company: co };
+  }
   if ('owner' in p) {
     var to = p.owner || '';
     if (!(lead || to === me.name || (to === '' && co.owner === me.name))) return err('Only the head can take a company away from someone else.');
@@ -789,7 +800,7 @@ function viewAll() {
   var owners = S.team.map(function (m) { return m.name; });
   var dirs = DIRS.filter(function (d) { return companies().some(function (c) { return c.direction === d; }); });
   companies().forEach(function (c) { if (c.direction && dirs.indexOf(c.direction) < 0) dirs.push(c.direction); });
-  var list = filtered().sort(function (a, b) { return a.company.localeCompare(b.company); });
+  var list = filtered(); // same order as the Companies sheet: newest added at the bottom
   var h = '<div class="toolbar">' +
     '<input class="input" id="q" type="search" placeholder="Search company, contact, raiser" value="' + esc(S.q) + '" aria-label="Search">' +
     '<select class="input" id="f-dir" aria-label="Direction">' + opt('All', 'All directions', S.fDir) + dirs.map(function (d) { return opt(d, d, S.fDir); }).join('') + '</select>' +
@@ -1033,8 +1044,10 @@ function companySheet() {
   return '<div class="scrim" data-scrim><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-title">' +
     '<div class="sheet-head"><div><h3 id="sh-title">' + esc(c.company) + '</h3><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' + pill(c.stage) + '<span class="chip">' + esc(c.direction) + '</span><span class="chip">' + esc(c.project) + '</span></div></div><button class="close" data-close aria-label="Close">×</button></div>' +
     '<div class="box"><div class="owner-row">' + owner + '</div>' +
-      (c.description ? '<div class="muted" style="font-size:14px">' + esc(c.description) + '</div>' : '') +
-      (c.contact ? '<div class="contact"><span class="val">' + esc(c.contact) + '</span><button class="btn small" data-copy="' + esc(c.contact) + '">Copy</button></div>' : '') +
+      (d.edit ? editDetailsHtml(d.edit) :
+        (c.description ? '<div class="muted" style="font-size:14px">' + esc(c.description) + '</div>' : '') +
+        (c.contact ? '<div class="contact"><span class="val">' + linkify(c.contact) + '</span><button class="btn small" data-copy="' + esc(c.contact) + '">Copy</button></div>' : '') +
+        '<button class="btn small ghost" style="justify-self:start" data-edit="' + esc(c.id) + '">' + (c.contact ? 'Edit contacts' : 'Add contacts') + '</button>') +
     '</div>' + companyComments(c) +
     '<div class="box"><div class="box-title">What did you just do?</div><div class="actions">' + ACTIONS.map(function (a) {
       return '<button class="act ' + (a.cls || '') + '" data-act="' + esc(a.a) + '" aria-pressed="' + (d.action === a.a) + '">' + esc(a.a) + '<small>' + esc(a.hint) + '</small></button>';
@@ -1050,6 +1063,31 @@ function companySheet() {
     }).join('') + '</div>' : '<div class="muted" style="font-size:14px">No updates yet.</div>') + '</div>' +
     del +
   '</div></div>';
+}
+
+function editDetailsHtml(e) {
+  return '<form id="edit-form" style="display:grid;gap:10px">' +
+    '<div class="field"><label for="e-name">Company name</label><input class="input" id="e-name" required value="' + esc(e.company) + '"></div>' +
+    '<div class="field"><label for="e-desc">What they do</label><input class="input" id="e-desc" value="' + esc(e.description) + '"></div>' +
+    '<div class="field"><label for="e-contact">Contacts and links</label><textarea class="input" id="e-contact" rows="3" placeholder="phone, Instagram or website link, email, contact person">' + esc(e.contact) + '</textarea></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary small" type="submit"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Saving…' : 'Save contacts') + '</button><button class="btn ghost small" type="button" data-edit-cancel>Cancel</button></div>' +
+  '</form>';
+}
+
+// Turns links, @handles and phone numbers inside the contact text into tappable links
+function linkify(text) {
+  var re = /(https?:\/\/[^\s,;]+|www\.[^\s,;]+|[\w.+-]+@[\w-]+\.[\w.-]+|\+?\d[\d\s()-]{8,}\d)/g;
+  var out = '', last = 0, m, str = String(text || '');
+  while ((m = re.exec(str))) {
+    out += esc(str.slice(last, m.index));
+    var v = m[0], href;
+    if (/@/.test(v) && !/^https?:/.test(v)) href = 'mailto:' + v;
+    else if (/^[+\d]/.test(v)) href = 'tel:' + v.replace(/[^\d+]/g, '');
+    else href = /^https?:/.test(v) ? v : 'https://' + v;
+    out += '<a href="' + esc(href) + '" target="_blank" rel="noopener" style="color:inherit">' + esc(v) + '</a>';
+    last = m.index + v.length;
+  }
+  return out + esc(str.slice(last));
 }
 
 function companyComments(c) {
@@ -1144,6 +1182,8 @@ document.addEventListener('click', function (e) {
     }
     renderSheet(); return;
   }
+  if (ds.edit) { var ce = byId(ds.edit); S.draft.edit = { company: ce.company || '', description: ce.description || '', contact: ce.contact || '' }; renderSheet(); var f = document.getElementById('e-contact'); if (f) f.focus(); return; }
+  if ('editCancel' in ds) { S.draft.edit = null; renderSheet(); return; }
   if (ds.stage) { S.draft.stage = ds.stage; renderSheet(); return; }
   if (ds.quick) { S.draft.next_date = ds.quick === 'clear' ? '' : addDays(+ds.quick); if (ds.quick === 'clear') S.draft.next_step = ''; renderSheet(); return; }
   if (ds.cfilter) { S.cFilter = ds.cfilter; render(); return; }
@@ -1177,6 +1217,11 @@ document.addEventListener('input', function (e) {
   if (id === 'a-name') S.draft.company = e.target.value;
   if (id === 'a-desc') S.draft.description = e.target.value;
   if (id === 'a-contact') S.draft.contact = e.target.value;
+  if (S.draft.edit) {
+    if (id === 'e-name') S.draft.edit.company = e.target.value;
+    if (id === 'e-desc') S.draft.edit.description = e.target.value;
+    if (id === 'e-contact') S.draft.edit.contact = e.target.value;
+  }
   if (/^d-/.test(id)) { var b = document.getElementById('save-upd'); if (b) b.disabled = S.busy; }
 });
 
@@ -1264,6 +1309,14 @@ document.addEventListener('submit', function (e) {
     var rtext = e.target.querySelector('input').value.trim();
     if (!rtext) return;
     save({ action: 'comment', parent: e.target.getAttribute('data-parent'), text: rtext }, 'Reply sent').catch(function () {});
+    return;
+  }
+  if (e.target.id === 'edit-form') {
+    var ec = byId(S.open), ed = S.draft.edit;
+    if (!ec || !ed) return;
+    if (!ed.company.trim()) { toast('Company name cannot be empty'); return; }
+    save({ action: 'editCompany', id: ec.id, company: ed.company.trim(), description: ed.description.trim(), contact: ed.contact.trim() }, 'Contacts saved: ' + ed.company.trim())
+      .then(function () { if (S.draft) S.draft.edit = null; renderSheet(); }, function () {});
     return;
   }
   if (e.target.id === 'add-form') {
