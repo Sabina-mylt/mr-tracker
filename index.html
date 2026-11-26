@@ -77,6 +77,11 @@ body::before { content: ""; position: fixed; top: var(--top-h, 101px); right: ca
   background: url("image.png") no-repeat var(--logo-hang-x) -24px / 721px 330px; border-radius: 0 0 19px 19px;
   box-shadow: 0 12px 26px rgba(3, 126, 243, .16); pointer-events: none; z-index: 0; display: none; }
 @media (min-width: 1500px) { body::before { display: block; } }
+/* laptops: a smaller tile still fits beside the content */
+@media (min-width: 1290px) and (max-width: 1499px) {
+  body::before { display: block; width: 100px; height: 165.6px; right: calc((100vw - 1080px) / 4 - 50px);
+    background-position: calc(var(--logo-hang-x) * .6) -14.4px; background-size: 432.6px 198px; border-radius: 0 0 11.4px 11.4px; }
+}
 html.gated body::before { display: none; }
 @media (max-width: 560px) { .theme-btn { display: none; } }
 #app, .top { position: relative; z-index: 1; }
